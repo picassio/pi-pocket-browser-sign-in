@@ -1,0 +1,11 @@
+{
+    "name": "pi-pocket-browser-sign-in",
+    "private": true,
+    "description": "Development only: the gallery installs browser-sign-in.ts and browser-sign-in.js, not this file.",
+    "type": "module",
+    "license": "MIT",
+    "scripts": {
+        "check": "tsc -p .",
+        "test": "node --test browser-sign-in.test.ts"
+    }
+}
