@@ -3,9 +3,10 @@
  * on a card in the chat, and the values go straight into the page. Pi never sees them, and neither does the transcript.
  * For a CAPTCHA or a sign-in to approve on a phone, Pi asks the person to do it in the Browser panel and tap Done.
  *
- * A filled password is hidden in the session from then on: if the page or a tool gives it back, it shows as
- * [password for <site>]. Pi's own browser tool may not type into a password field. This keeps passwords out of the
- * chat by accident and by default; it is not a boundary against a model that sets out to read a field.
+ * A filled password, username, or code is hidden in the session from then on: if the page or a tool gives it back, it
+ * shows as [password for <site>]. A value too short to hide (under 4 characters) leaves the page out of what Pi gets.
+ * Pi's own browser tool may not type into a password field. This keeps sign-ins out of the chat by accident and by
+ * default; it is not a boundary against a model that sets out to read a field.
  */
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, section, ToolTask } from "@earendil-works/pi-durable";
@@ -18,9 +19,6 @@ const reply = (text: string, isError = false) => ({
     output: [{ type: "text" as const, text }],
     ...(isError ? { isError: true } : {}),
 });
-
-/** How long a one-time code stays hidden in its session. */
-const CODE_HIDDEN_FOR = 10 * 60_000;
 
 /** The arguments of Pi's `browser` tool that name a target. */
 const TARGET = ["ref", "selector", "label", "x", "y"] as const;
@@ -41,9 +39,9 @@ function siteOf(url: string): string {
     }
 }
 
-/** A label `host.hide` takes: letters, digits, spaces, and `_ . : -`, up to 60. */
-const labelFor = (site: string) =>
-    `password for ${site}`
+/** A label `host.hide` takes: letters, digits, spaces, and `_ . : -`, up to 60. `password for example.com`. */
+const labelFor = (what: string, site: string) =>
+    `${what} for ${site}`
         .replace(/[^A-Za-z0-9 _.:-]/g, "-")
         .slice(0, 60)
         .trim();
@@ -69,6 +67,21 @@ export default function createBrowserSignIn(host: Host, web: Web) {
             stop();
         }
     });
+
+    /** Hide a person's value in one session from now on: whether it is hidden (a value under 4 characters is not). */
+    const hide = (value: string, label: string, conversationId: unknown): boolean => {
+        if (value.length < 4) {
+            return false;
+        }
+
+        try {
+            hidden.push(host.hide({ value, label, conversationId: Number(conversationId) }));
+
+            return true;
+        } catch {
+            return false;
+        }
+    };
 
     /** The session's page, or why there is none. */
     const pageOf = async (conversationId: unknown): Promise<BrowserPageHandle | string> => {
@@ -112,7 +125,6 @@ export default function createBrowserSignIn(host: Host, web: Web) {
             let password: BrowserTarget | undefined = refOf(args.password)
                 ? { ref: refOf(args.password)! }
                 : undefined;
-            let userName = "Username or email";
 
             // No refs: the page's first password field, and the field before it for the username.
             if (username === undefined && password === undefined) {
@@ -136,7 +148,6 @@ export default function createBrowserSignIn(host: Host, web: Web) {
 
                 password = at < 0 ? undefined : { ref: fields[at]!.ref };
                 username = before === undefined ? undefined : { ref: before.ref };
-                userName = before?.name || userName;
             }
 
             // The password field must be one: a value typed for it never lands in a field that shows it.
@@ -171,7 +182,8 @@ export default function createBrowserSignIn(host: Host, web: Web) {
                             : [
                                   {
                                       name: "username",
-                                      label: userName.slice(0, 80),
+                                      // A fixed label: the page's own words never go on the card.
+                                      label: "Username or email",
                                       autocomplete: "username",
                                   },
                               ]),
@@ -199,21 +211,19 @@ export default function createBrowserSignIn(host: Host, web: Web) {
                 const value = answer.values.password ?? "";
 
                 // Hide first: if hiding refuses the value (too short), nothing went into the page.
-                try {
-                    hidden.push(
-                        host.hide({
-                            value,
-                            label: labelFor(site),
-                            conversationId: Number(api.conversationId),
-                        }),
-                    );
-                } catch (error) {
+                if (!hide(value, labelFor("password", site), api.conversationId)) {
                     return reply(
-                        `The password could not be kept out of the chat (${(error as Error).message}). Ask the person to sign in in the Browser panel with browser_ask_person.`,
+                        "The password could not be kept out of the chat (it is shorter than 4 characters), so nothing was filled in. Ask the person to sign in in the Browser panel with browser_ask_person.",
                         true,
                     );
                 }
             }
+
+            // The username field shows what was typed, so hide it too. One too short to hide still goes in, and the
+            // page is then left out of what Pi gets.
+            const userHidden =
+                username === undefined ||
+                hide(answer.values.username ?? "", labelFor("username", site), api.conversationId);
 
             try {
                 if (username !== undefined) {
@@ -227,7 +237,11 @@ export default function createBrowserSignIn(host: Host, web: Web) {
                 return reply(`The page did not take the values: ${(error as Error).message}`, true);
             }
 
-            return after(page, `${answer.by} filled in the sign-in. Submit the form now.`);
+            return userHidden
+                ? after(page, `${answer.by} filled in the sign-in. Submit the form now.`)
+                : reply(
+                      `${answer.by} filled in the sign-in. Submit the form now. The page is not shown here, since its username field shows the username; take a snapshot after you submit.`,
+                  );
         },
     });
 
@@ -284,29 +298,9 @@ export default function createBrowserSignIn(host: Host, web: Web) {
             }
 
             const code = (answer.values.code ?? "").trim();
-
-            // The field shows the code, so the snapshot would give it to Pi: hide it in this session while it can still
-            // be used. A one-time code is short, so a guess could match; ten minutes keeps that window small.
-            if (code.length >= 4) {
-                try {
-                    const stop = host.hide({
-                        value: code,
-                        label: `code for ${siteOf(page.url)}`
-                            .replace(/[^A-Za-z0-9 _.:-]/g, "-")
-                            .slice(0, 60),
-                        conversationId: Number(api.conversationId),
-                    });
-                    const timer = setTimeout(stop, CODE_HIDDEN_FOR);
-
-                    timer.unref();
-                    hidden.push(() => {
-                        clearTimeout(timer);
-                        stop();
-                    });
-                } catch {
-                    // Not hidden: it still never went through Pi; the snapshot may show it.
-                }
-            }
+            // The field shows the code, so a snapshot would give it to Pi: hide it in this session for as long as the
+            // module runs. A code too short to hide still goes in, and the page is then left out of what Pi gets.
+            const codeHidden = hide(code, labelFor("code", siteOf(page.url)), api.conversationId);
 
             try {
                 await page.fill(field, code);
@@ -314,7 +308,11 @@ export default function createBrowserSignIn(host: Host, web: Web) {
                 return reply(`The page did not take the code: ${(error as Error).message}`, true);
             }
 
-            return after(page, `${answer.by} filled in the code. Submit the form now.`);
+            return codeHidden
+                ? after(page, `${answer.by} filled in the code. Submit the form now.`)
+                : reply(
+                      `${answer.by} filled in the code. Submit the form now. The page is not shown here, since its code field shows the code; take a snapshot after you submit.`,
+                  );
         },
     });
 
@@ -371,8 +369,11 @@ export default function createBrowserSignIn(host: Host, web: Web) {
                 return undefined;
             }
 
-            const page = await host.browser(api.conversationId);
-            const found = await page?.inspect(at as BrowserTarget).catch(() => undefined);
+            // A hook that throws blocks Pi's call: a page that cannot be read leaves the call to the browser tool.
+            const found = await host
+                .browser(api.conversationId)
+                .then((page) => page?.inspect(at as BrowserTarget))
+                .catch(() => undefined);
 
             return found?.password
                 ? {

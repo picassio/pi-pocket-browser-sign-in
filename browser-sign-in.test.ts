@@ -158,13 +158,15 @@ test(
         const [card] = app.approvals.forConversation(id);
 
         assert.deepEqual(
-            card!.form?.fields.map((field: { name: string; secret?: boolean }) => [
+            card!.form?.fields.map((field: { name: string; label: string; secret?: boolean }) => [
                 field.name,
+                field.label,
                 field.secret === true,
             ]),
             [
-                ["username", false],
-                ["password", true],
+                // A fixed label: the page calls its field "Email", and its words never go on the card.
+                ["username", "Username or email", false],
+                ["password", "Password", true],
             ],
         );
         // A plain Allow is not an answer.
@@ -178,10 +180,13 @@ test(
         const seen = await lastSeen(id);
 
         assert.match(seen, /filled in the sign-in/);
-        assert.match(seen, /tuan@acme\.test/);
+        assert.match(seen, /\[username for 127\.0\.0\.1:\d+\]/, "the username is hidden too");
         assert.match(seen, /••••/);
-        assert.ok(!(await stored(id)).includes(PASSWORD));
-        assert.ok(!sent.join("").includes(PASSWORD));
+
+        for (const value of [PASSWORD, "tuan@acme.test"]) {
+            assert.ok(!(await stored(id)).includes(value));
+            assert.ok(!sent.join("").includes(value));
+        }
     },
 );
 
@@ -229,6 +234,25 @@ test("browser_ask_person: Done gives the page; Decline says so", real, async () 
     await answer(id, false);
     await done();
     assert.match(await lastSeen(id), /declined/);
+});
+
+test("a username or a code too short to hide still goes in, and Pi gets no page that shows it", real, async () => {
+    const short = await newSession(app);
+
+    await say(short, "open the site");
+
+    let done = await submit(short, "sign me in");
+
+    await answer(short, true, { username: "bo", password: "long-enough-pw" });
+    await done();
+    assert.match(await lastSeen(short), /The page is not shown here/);
+    assert.doesNotMatch(await lastSeen(short), /The page now/);
+
+    done = await submit(short, "get the code");
+    await answer(short, true, { code: "482" });
+    await done();
+    assert.match(await lastSeen(short), /filled in the code[^]*The page is not shown here/);
+    assert.ok(!(await lastSeen(short)).includes('"482"'));
 });
 
 test("with no page open, the tools say to open one first", real, async () => {
